@@ -90,6 +90,9 @@ class BedMesh:
         self.printer.register_event_handler("klippy:connect",
                                             self.handle_connect)
         self.last_position = [0., 0., 0., 0.]
+        self.log_points = config.getboolean('log_points', True)
+        # Truncate the number of points logged. Zero is no truncation.
+        self.log_points_truncate = config.getint('log_points_truncate', 250, minval=0 )
         self.bmc = BedMeshCalibrate(config, self)
         self.z_mesh = None
         self.toolhead = None
@@ -253,7 +256,7 @@ class BedMesh:
     def cmd_BED_MESH_OUTPUT(self, gcmd):
         if gcmd.get_int('PGP', 0):
             # Print Generated Points instead of mesh
-            self.bmc.print_generated_points(gcmd.respond_info)
+            self.bmc.print_generated_points(gcmd.respond_info, force=True)
         elif self.z_mesh is None:
             gcmd.respond_info("Bed has not been probed")
         else:
@@ -351,14 +354,18 @@ class BedMeshCalibrate:
         probe = self.printer.lookup_object('probe', None)
         if probe is not None:
             x_offset, y_offset = probe.get_offsets()[:2]
-        print_func("bed_mesh: generated points\nIndex"
-                   " |  Tool Adjusted  |   Probe")
         points = self.probe_mgr.get_base_points()
-        for i, (x, y) in enumerate(points):
-            adj_pt = "(%.1f, %.1f)" % (x - x_offset, y - y_offset)
-            mesh_pt = "(%.1f, %.1f)" % (x, y)
-            print_func(
-                "  %-4d| %-16s| %s" % (i, adj_pt, mesh_pt))
+        if force or self.bedmesh.log_points:
+            print_func("bed_mesh: generated points\nIndex"
+                    " |  Tool Adjusted  |   Probe")
+            for i, (x, y) in enumerate(points):
+                if not force and self.bedmesh.log_points_truncate and i == self.bedmesh.log_points_truncate:
+                    print_func("  (truncated, increase [bed_mesh] log_points_truncate to see more)")
+                    break
+                adj_pt = "(%.1f, %.1f)" % (x - x_offset, y - y_offset)
+                mesh_pt = "(%.1f, %.1f)" % (x, y)
+                print_func(
+                    "  %-4d| %-16s| %s" % (i, adj_pt, mesh_pt))
         zero_ref_pos = self.probe_mgr.get_zero_ref_pos()
         if zero_ref_pos is not None:
             print_func(
