@@ -138,6 +138,8 @@ class BedMesh:
         self.toolhead = self.printer.lookup_object('toolhead')
         self.bmc.print_generated_points(logging.info)
     def set_mesh(self, mesh):
+        if mesh is not None:
+            mesh.reactor = self.printer.get_reactor()
         if mesh is not None and self.fade_end != self.FADE_DISABLE:
             self.log_fade_complete = True
             if self.base_fade_target is None:
@@ -231,7 +233,7 @@ class BedMesh:
     def get_status(self, eventtime=None):
         return self.status
     def update_status(self):
-        self.status = {
+        new_status = {
             "profile_name": "",
             "mesh_min": (0., 0.),
             "mesh_max": (0., 0.),
@@ -245,11 +247,12 @@ class BedMesh:
             mesh_max = (params['max_x'], params['max_y'])
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
-            self.status['profile_name'] = self.z_mesh.get_profile_name()
-            self.status['mesh_min'] = mesh_min
-            self.status['mesh_max'] = mesh_max
-            self.status['probed_matrix'] = probed_matrix
-            self.status['mesh_matrix'] = mesh_matrix
+            new_status['profile_name'] = self.z_mesh.get_profile_name()
+            new_status['mesh_min'] = mesh_min
+            new_status['mesh_max'] = mesh_max
+            new_status['probed_matrix'] = probed_matrix
+            new_status['mesh_matrix'] = mesh_matrix
+        self.status = new_status
     def get_mesh(self):
         return self.z_mesh
     cmd_BED_MESH_OUTPUT_help = "Retrieve interpolated grid of probed z-points"
@@ -327,6 +330,7 @@ class BedMeshCalibrate:
     ALGOS = ['lagrange', 'bicubic']
     def __init__(self, config, bedmesh):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.orig_config = {'radius': None, 'origin': None}
         self.radius = self.origin = None
         self.mesh_min = self.mesh_max = (0., 0.)
@@ -349,7 +353,15 @@ class BedMeshCalibrate:
         self.gcode.register_command(
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
             desc=self.cmd_BED_MESH_CALIBRATE_help)
-    def print_generated_points(self, print_func):
+    def _reactor_yield(self, return_value=None):
+        self.reactor.pause(self.reactor.NOW)
+        return return_value
+    def _reactor_yield_interval(self, sequence, interval=100):
+        for i, v in enumerate(sequence):
+            if i % interval == interval - 1:
+                self.reactor.pause(self.reactor.NOW)
+            yield v
+    def print_generated_points(self, print_func, force=False):
         x_offset = y_offset = 0.
         probe = self.printer.lookup_object('probe', None)
         if probe is not None:
@@ -658,7 +670,10 @@ class BedMeshCalibrate:
     def probe_finalize(self, offsets, positions):
         z_offset = offsets[2]
         positions = [[round(p[0], 2), round(p[1], 2), p[2]]
-                     for p in positions]
+                     for p in self._reactor_yield_interval(positions, 500)]
+        
+        self._reactor_yield()
+        
         if self.probe_mgr.get_zero_ref_mode() == ZrefMode.PROBE:
             ref_pos = positions.pop()
             logging.info(
@@ -667,14 +682,18 @@ class BedMeshCalibrate:
                 % (ref_pos[0], ref_pos[1], ref_pos[2])
             )
             z_offset = ref_pos[2]
+
         base_points = self.probe_mgr.get_base_points()
         params = dict(self.mesh_config)
         params['min_x'] = min(base_points, key=lambda p: p[0])[0]
         params['max_x'] = max(base_points, key=lambda p: p[0])[0]
+        self._reactor_yield()
         params['min_y'] = min(base_points, key=lambda p: p[1])[1]
         params['max_y'] = max(base_points, key=lambda p: p[1])[1]
         x_cnt = params['x_count']
         y_cnt = params['y_count']
+        
+        self._reactor_yield()
 
         substitutes = self.probe_mgr.get_substitutes()
         probed_pts = positions
@@ -703,6 +722,7 @@ class BedMeshCalibrate:
                 corrected_pts.append(fpt)
             corrected_pts.extend(positions[start_idx:])
             positions = corrected_pts
+            self._reactor_yield()
 
         # validate length of result
         if len(base_points) != len(positions):
@@ -716,7 +736,7 @@ class BedMeshCalibrate:
         probed_matrix = []
         row = []
         prev_pos = base_points[0]
-        for pos, result in zip(base_points, positions):
+        for i, (pos, result) in enumerate(zip(base_points, positions)):
             offset_pos = [p - o for p, o in zip(pos, offsets[:2])]
             if (
                 not isclose(offset_pos[0], result[0], abs_tol=.5) or
@@ -739,6 +759,8 @@ class BedMeshCalibrate:
                 # probed in the negative direction
                 row.insert(0, z_pos)
             prev_pos = pos
+            if i % 500 == 499:
+                self._reactor_yield()
         # append last row
         probed_matrix.append(row)
 
@@ -774,12 +796,14 @@ class BedMeshCalibrate:
                     ("bed_mesh: invalid x-axis table length\n"
                         "Probed table length: %d Probed Table:\n%s") %
                     (len(probed_matrix), str(probed_matrix)))
-
-        z_mesh = ZMesh(params, self._profile_name)
+        
+        z_mesh = ZMesh(params, self._profile_name, self.reactor)
+        
         try:
             z_mesh.build_mesh(probed_matrix)
         except BedMeshError as e:
             raise self.gcode.error(str(e))
+        
         if self.probe_mgr.get_zero_ref_mode() == ZrefMode.IN_MESH:
             # The reference can be anywhere in the mesh, therefore
             # it is necessary to set the reference after the initial mesh
@@ -788,6 +812,7 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
+        
         if self._profile_name is not None:
             self.bedmesh.save_profile(self._profile_name)
     def _dump_points(self, probed_pts, corrected_pts, offsets):
@@ -1323,7 +1348,8 @@ class MoveSplitter:
 
 
 class ZMesh:
-    def __init__(self, params, name):
+    def __init__(self, params, name, reactor = None):
+        self.reactor = reactor
         self.profile_name = name or "adaptive-%X" % (id(self),)
         self.probed_matrix = self.mesh_matrix = None
         self.mesh_params = params
@@ -1361,14 +1387,18 @@ class ZMesh:
                            (self.mesh_x_count - 1)
         self.mesh_y_dist = (self.mesh_y_max - self.mesh_y_min) / \
                            (self.mesh_y_count - 1)
+    def _reactor_yield(self, return_value=None):
+        if self.reactor:
+            self.reactor.pause(self.reactor.NOW)
+        return return_value
     def get_mesh_matrix(self):
         if self.mesh_matrix is not None:
-            return [[round(z, 6) for z in line]
+            return [self._reactor_yield([round(z, 6) for z in line])
                     for line in self.mesh_matrix]
         return [[]]
     def get_probed_matrix(self):
         if self.probed_matrix is not None:
-            return [[round(z, 6) for z in line]
+            return [self._reactor_yield([round(z, 6) for z in line])
                     for line in self.probed_matrix]
         return [[]]
     def get_mesh_params(self):
@@ -1387,6 +1417,7 @@ class ZMesh:
             print_func("bed_mesh: bed has not been probed")
     def print_mesh(self, print_func, move_z=None):
         matrix = self.get_mesh_matrix()
+        self._reactor_yield()
         if matrix is not None:
             msg = "Mesh X,Y: %d,%d\n" % (self.mesh_x_count, self.mesh_y_count)
             if move_z is not None:
@@ -1399,10 +1430,12 @@ class ZMesh:
             msg += "Interpolation Algorithm: %s\n" \
                    % (self.mesh_params['algo'])
             msg += "Measured points:\n"
+            self._reactor_yield()
             for y_line in range(self.mesh_y_count - 1, -1, -1):
                 for z in matrix[y_line]:
                     msg += "  %f" % (z)
                 msg += "\n"
+                self._reactor_yield()
             print_func(msg)
         else:
             print_func("bed_mesh: Z Mesh not generated")
@@ -1410,6 +1443,7 @@ class ZMesh:
         self.probed_matrix = z_matrix
         self._sample(z_matrix)
         self.print_mesh(logging.debug)
+        self._reactor_yield()
     def set_zero_reference(self, xpos, ypos):
         offset = self.calc_z(xpos, ypos)
         logging.info(
@@ -1539,6 +1573,7 @@ class ZMesh:
              else z_matrix[j//y_mult][i//x_mult]
              for i in range(self.mesh_x_count)]
              for j in range(self.mesh_y_count)]
+        self._reactor_yield()
         # Interpolate X values
         for y in range(self.mesh_y_count):
             if y % y_mult != 0:
@@ -1548,6 +1583,7 @@ class ZMesh:
                     continue
                 pts = self._get_x_ctl_pts(x, y)
                 self.mesh_matrix[y][x] = self._cardinal_spline(pts, c)
+            self._reactor_yield()
         # Interpolate Y values
         for x in range(self.mesh_x_count):
             for y in range(self.mesh_y_count):
@@ -1555,6 +1591,7 @@ class ZMesh:
                     continue
                 pts = self._get_y_ctl_pts(x, y)
                 self.mesh_matrix[y][x] = self._cardinal_spline(pts, c)
+            self._reactor_yield()
     def _get_x_ctl_pts(self, x, y):
         # Fetch control points and t for a X value in the mesh
         x_mult = self.x_mult
@@ -1721,7 +1758,7 @@ class ProfileManager:
                 "bed_mesh: Unknown profile [%s]" % prof_name)
         probed_matrix = profile['points']
         mesh_params = profile['mesh_params']
-        z_mesh = ZMesh(mesh_params, prof_name)
+        z_mesh = ZMesh(mesh_params, prof_name, self.printer.get_reactor())
         try:
             z_mesh.build_mesh(probed_matrix)
         except BedMeshError as e:
