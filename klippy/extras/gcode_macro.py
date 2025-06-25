@@ -18,16 +18,24 @@ class GetStatusWrapper:
         self.eventtime = eventtime
         self.cache = {}
     def __getitem__(self, val):
-        sval = str(val).strip()
-        if sval in self.cache:
-            return self.cache[sval]
-        po = self.printer.lookup_object(sval, None)
-        if po is None or not hasattr(po, 'get_status'):
-            raise KeyError(val)
-        if self.eventtime is None:
-            self.eventtime = self.printer.get_reactor().monotonic()
-        self.cache[sval] = res = copy.deepcopy(po.get_status(self.eventtime))
-        return res
+        reactor = self.printer.get_reactor()
+        start_time = reactor.monotonic()
+        sval = None
+        try:
+            sval = str(val).strip()
+            if sval in self.cache:
+                return self.cache[sval]
+            po = self.printer.lookup_object(sval, None)
+            if po is None or not hasattr(po, 'get_status'):
+                raise KeyError(val)
+            if self.eventtime is None:
+                self.eventtime = self.printer.get_reactor().monotonic()            
+            self.cache[sval] = res = copy.deepcopy(po.get_status(self.eventtime))
+            return res
+        finally:
+            elapsed = reactor.monotonic() - start_time
+            if elapsed > 0.002:
+                logging.warning(f"gcode_macro_slow_get_item: Object '{sval}' took {elapsed*1000.:.1f} ms")
     def __contains__(self, val):
         try:
             self.__getitem__(val)
@@ -44,6 +52,7 @@ class TemplateWrapper:
     def __init__(self, printer, env, name, script):
         self.printer = printer
         self.name = name
+        self.reactor = printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         gcode_macro = self.printer.lookup_object('gcode_macro')
         self.create_template_context = gcode_macro.create_template_context
@@ -58,7 +67,13 @@ class TemplateWrapper:
         if context is None:
             context = self.create_template_context()
         try:
-            return str(self.template.render(context))
+            start_time = self.reactor.monotonic()
+            result = str(self.template.render(context))
+            elapsed = self.reactor.monotonic() - start_time
+            if elapsed > 0.005:
+                logging.warning("gcode_macro_slow_template_rendering: Template '%s' took %.1f ms",
+                                self.name, elapsed * 1000.)
+            return result
         except Exception as e:
             msg = "Error evaluating '%s': %s" % (
                 self.name, traceback.format_exception_only(type(e), e)[-1])
