@@ -18,16 +18,23 @@ class GetStatusWrapper:
         self.eventtime = eventtime
         self.cache = {}
     def __getitem__(self, val):
-        sval = str(val).strip()
-        if sval in self.cache:
-            return self.cache[sval]
-        po = self.printer.lookup_object(sval, None)
-        if po is None or not hasattr(po, 'get_status'):
-            raise KeyError(val)
-        if self.eventtime is None:
-            self.eventtime = self.printer.get_reactor().monotonic()
-        self.cache[sval] = res = copy.deepcopy(po.get_status(self.eventtime))
-        return res
+        start_time = self.printer.get_reactor().monotonic()
+        try:
+            sval = str(val).strip()
+            if sval in self.cache:
+                return self.cache[sval]
+            po = self.printer.lookup_object(sval, None)
+            if po is None or not hasattr(po, 'get_status'):
+                raise KeyError(val)
+            if self.eventtime is None:
+                self.eventtime = self.printer.get_reactor().monotonic()
+            self.cache[sval] = res = copy.deepcopy(po.get_status(self.eventtime))
+            return res
+        finally:
+            elapsed = self.printer.get_reactor().monotonic() - start_time
+            if elapsed > 0.002:
+                logging.warning("slow_get_status: Object '%s' took %.1f ms to get_status",
+                                sval, elapsed * 1000.)
     def __contains__(self, val):
         try:
             self.__getitem__(val)
