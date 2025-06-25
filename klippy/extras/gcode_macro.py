@@ -44,6 +44,7 @@ class TemplateWrapper:
     def __init__(self, printer, env, name, script):
         self.printer = printer
         self.name = name
+        self.reactor = printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         gcode_macro = self.printer.lookup_object('gcode_macro')
         self.create_template_context = gcode_macro.create_template_context
@@ -58,7 +59,13 @@ class TemplateWrapper:
         if context is None:
             context = self.create_template_context()
         try:
-            return str(self.template.render(context))
+            start_time = self.reactor.monotonic()
+            result = str(self.template.render(context))
+            elapsed = self.reactor.monotonic() - start_time
+            if elapsed > 0.005:
+                logging.warning("slow_template_rendering: Template '%s' took %.1f ms to render",
+                                self.name, elapsed * 1000.)
+            return result
         except Exception as e:
             msg = "Error evaluating '%s': %s" % (
                 self.name, traceback.format_exception_only(type(e), e)[-1])
