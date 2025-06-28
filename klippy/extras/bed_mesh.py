@@ -245,6 +245,8 @@ class BedMesh:
             params = self.z_mesh.get_mesh_params()
             mesh_min = (params['min_x'], params['min_y'])
             mesh_max = (params['max_x'], params['max_y'])
+            # Note: get_probed_matrix() and get_mesh_matrix() can take several ms 
+            # but are both reactor-yielding.
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
             new_status['profile_name'] = self.z_mesh.get_profile_name()
@@ -1669,6 +1671,7 @@ class ProfileManager:
     def __init__(self, config, bedmesh):
         self.name = config.get_name()
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.gcode = self.printer.lookup_object('gcode')
         self.bedmesh = bedmesh
         self.profiles = {}
@@ -1723,21 +1726,24 @@ class ProfileManager:
                 "Unable to save to profile [%s], the bed has not been probed"
                 % (prof_name))
             return
+        # Note: get_probed_matrix() can take several ms, but is reactor-yielding.
         probed_matrix = z_mesh.get_probed_matrix()
         mesh_params = z_mesh.get_mesh_params()
         configfile = self.printer.lookup_object('configfile')
         cfg_name = self.name + " " + prof_name
         # set params
         z_values = ""
+        rows = []
         for line in probed_matrix:
-            z_values += "\n  "
-            for p in line:
-                z_values += "%.6f, " % p
-            z_values = z_values[:-2]
+            row = "  " + ", ".join(["%.6f" % p for p in line])
+            rows.append(row)
+            self.reactor.pause(self.reactor.NOW)
+        z_values += "\n" + "\n".join(rows)
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():
             configfile.set(cfg_name, key, value)
+            self.reactor.pause(self.reactor.NOW)
         # save copy in local storage
         # ensure any self.profiles returned as status remains immutable
         profiles = dict(self.profiles)
@@ -1745,6 +1751,7 @@ class ProfileManager:
         profile['points'] = probed_matrix
         profile['mesh_params'] = collections.OrderedDict(mesh_params)
         self.profiles = profiles
+        # Note: update_status() can take several ms, but is reactor-yielding.
         self.bedmesh.update_status()
         self.gcode.respond_info(
             "Bed Mesh state has been saved to profile [%s]\n"
