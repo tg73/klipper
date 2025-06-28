@@ -18,7 +18,10 @@ class GetStatusWrapper:
         self.eventtime = eventtime
         self.cache = {}
     def __getitem__(self, val):
-        start_time = self.printer.get_reactor().monotonic()
+        reactor = self.printer.get_reactor()
+        timings = []
+        timings.append(('start', reactor.monotonic()))
+        sval = None
         try:
             sval = str(val).strip()
             if sval in self.cache:
@@ -27,14 +30,18 @@ class GetStatusWrapper:
             if po is None or not hasattr(po, 'get_status'):
                 raise KeyError(val)
             if self.eventtime is None:
-                self.eventtime = self.printer.get_reactor().monotonic()
-            self.cache[sval] = res = copy.deepcopy(po.get_status(self.eventtime))
+                self.eventtime = self.printer.get_reactor().monotonic()            
+            timings.append(('upto_get_status', reactor.monotonic()))
+            status = po.get_status(self.eventtime)
+            timings.append(('get_status', reactor.monotonic()))
+            res = copy.deepcopy(status)
+            timings.append(('deepcopy', reactor.monotonic()))
+            self.cache[sval] = res
             return res
         finally:
-            elapsed = self.printer.get_reactor().monotonic() - start_time
+            elapsed = reactor.monotonic() - timings[0][1]
             if elapsed > 0.002:
-                logging.warning("slow_get_status: Object '%s' took %.1f ms to get_status",
-                                sval, elapsed * 1000.)
+                logging.warning(f"slow_gcode_macro_get_item: Object '{sval}' took {elapsed*1000.:.1f} ms ({[f'{n}:{(t - timings[i][1])*1000.:.1f} ms' for i, (n, t) in enumerate(timings[1:])]})")
     def __contains__(self, val):
         try:
             self.__getitem__(val)
@@ -70,7 +77,7 @@ class TemplateWrapper:
             result = str(self.template.render(context))
             elapsed = self.reactor.monotonic() - start_time
             if elapsed > 0.005:
-                logging.warning("slow_template_rendering: Template '%s' took %.1f ms to render",
+                logging.warning("slow_gcode_macro_template_rendering: Template '%s' took %.1f ms",
                                 self.name, elapsed * 1000.)
             return result
         except Exception as e:
