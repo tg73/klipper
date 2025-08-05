@@ -16,6 +16,11 @@ PROFILE_OPTIONS = {
 class BedMeshError(Exception):
     pass
 
+DEFAULT_REACTOR_PAUSE_OFFSET = 0.006 # 6ms
+
+def pause(reactor, offset=DEFAULT_REACTOR_PAUSE_OFFSET):
+    reactor.pause(reactor.monotonic() + offset)
+
 # PEP 485 isclose()
 def isclose(a, b, rel_tol=1e-09, abs_tol=0.0):
     return abs(a-b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
@@ -246,7 +251,7 @@ class BedMesh:
             params = self.z_mesh.get_mesh_params()
             mesh_min = (params['min_x'], params['min_y'])
             mesh_max = (params['max_x'], params['max_y'])
-            # Note: get_probed_matrix() and get_mesh_matrix() can take several ms 
+            # Note: get_probed_matrix() and get_mesh_matrix() can take several ms
             # but are both reactor-yielding.
             probed_matrix = self.z_mesh.get_probed_matrix()
             mesh_matrix = self.z_mesh.get_mesh_matrix()
@@ -357,12 +362,12 @@ class BedMeshCalibrate:
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
             desc=self.cmd_BED_MESH_CALIBRATE_help)
     def _reactor_yield(self, return_value=None):
-        self.reactor.pause(self.reactor.NOW)
+        pause(self.reactor)
         return return_value
     def _reactor_yield_interval(self, sequence, interval=100):
         for i, v in enumerate(sequence):
             if i % interval == interval - 1:
-                self.reactor.pause(self.reactor.NOW)
+                pause(self.reactor)
             yield v
     def print_generated_points(self, print_func, force=False):
         x_offset = y_offset = 0.
@@ -674,9 +679,9 @@ class BedMeshCalibrate:
         z_offset = offsets[2]
         positions = [[round(p[0], 2), round(p[1], 2), p[2]]
                      for p in self._reactor_yield_interval(positions, 500)]
-        
+
         self._reactor_yield()
-        
+
         if self.probe_mgr.get_zero_ref_mode() == ZrefMode.PROBE:
             ref_pos = positions.pop()
             logging.info(
@@ -695,7 +700,7 @@ class BedMeshCalibrate:
         params['max_y'] = max(base_points, key=lambda p: p[1])[1]
         x_cnt = params['x_count']
         y_cnt = params['y_count']
-        
+
         self._reactor_yield()
 
         substitutes = self.probe_mgr.get_substitutes()
@@ -799,14 +804,14 @@ class BedMeshCalibrate:
                     ("bed_mesh: invalid x-axis table length\n"
                         "Probed table length: %d Probed Table:\n%s") %
                     (len(probed_matrix), str(probed_matrix)))
-        
+
         z_mesh = ZMesh(params, self._profile_name, self.reactor)
-        
+
         try:
             z_mesh.build_mesh(probed_matrix)
         except BedMeshError as e:
             raise self.gcode.error(str(e))
-        
+
         if self.probe_mgr.get_zero_ref_mode() == ZrefMode.IN_MESH:
             # The reference can be anywhere in the mesh, therefore
             # it is necessary to set the reference after the initial mesh
@@ -815,7 +820,7 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
-        
+
         if self._profile_name is not None:
             self.bedmesh.save_profile(self._profile_name)
     def _dump_points(self, probed_pts, corrected_pts, offsets):
@@ -1392,7 +1397,7 @@ class ZMesh:
                            (self.mesh_y_count - 1)
     def _reactor_yield(self, return_value=None):
         if self.reactor:
-            self.reactor.pause(self.reactor.NOW)
+            pause(self.reactor)
         return return_value
     def get_mesh_matrix(self):
         if self.mesh_matrix is not None:
@@ -1738,13 +1743,13 @@ class ProfileManager:
         for line in probed_matrix:
             row = "  " + ", ".join(["%.6f" % p for p in line])
             rows.append(row)
-            self.reactor.pause(self.reactor.NOW)
+            pause(self.reactor)
         z_values += "\n" + "\n".join(rows)
         configfile.set(cfg_name, 'version', PROFILE_VERSION)
         configfile.set(cfg_name, 'points', z_values)
         for key, value in mesh_params.items():
             configfile.set(cfg_name, key, value)
-            self.reactor.pause(self.reactor.NOW)
+            pause(self.reactor)
         # save copy in local storage
         # ensure any self.profiles returned as status remains immutable
         profiles = dict(self.profiles)
