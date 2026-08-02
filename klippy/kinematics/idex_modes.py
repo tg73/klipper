@@ -65,7 +65,8 @@ class DualCarriages:
             toolhead.set_position(newpos)
         kin.update_limits(self.axis, target_dc.get_rail().get_range())
     def home(self, homing_state):
-        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        toolhead = self.printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
         enumerated_dcs = list(enumerate(self.dc))
         if (self.get_dc_order(0, 1) > 0) != \
                 self.dc[0].get_rail().get_homing_info().positive_dir:
@@ -75,8 +76,40 @@ class DualCarriages:
         for i, dc_rail in enumerated_dcs:
             self.toggle_active_dc_rail(i)
             kin.home_axis(homing_state, self.axis, dc_rail.get_rail())
+            toolhead.flush_step_generation()
+            pos = toolhead.get_position()
+            homing_info = dc_rail.get_rail().get_homing_info()
+            if pos[self.axis] != homing_info.position_endstop:
+                self._debug_show_position(i, title="after homing but before correction")
+                pos[self.axis] = homing_info.position_endstop
+                toolhead.move(pos, homing_info.second_homing_speed)
+            toolhead.flush_step_generation()
+            self._debug_show_position(i, title="after homing and correction")
+
         # Restore the original rails ordering
         self.toggle_active_dc_rail(0)
+
+    # TEMPORARY: helper for debugging
+    def _debug_show_position(self, rail_index, title="after homing rail"):
+        toolhead = self.printer.lookup_object('toolhead', None)
+        gcode = self.printer.lookup_object('gcode', None)
+        kin = toolhead.get_kinematics()
+        steppers = kin.get_steppers()
+        mcu_pos = " ".join(["%s:%d" % (s.get_name(), s.get_mcu_position())
+                            for s in steppers])
+        cinfo = [(s.get_name(), s.get_commanded_position()) for s in steppers]
+        stepper_pos = " ".join(["%s:%.6f" % (a, v) for a, v in cinfo])
+        kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
+        kin_pos = " ".join(["%s:%.6f" % (a, v) for a, v in kinfo])
+        toolhead_pos = " ".join(["%s:%.6f" % (a, v) for a, v in zip(
+            "XYZE", toolhead.get_position())])
+        gcode.respond_info( "Position %s rail %d:\n"
+                        "mcu: %s\n"
+                        "stepper: %s\n"
+                        "kinematic: %s\n"
+                        "toolhead: %s\n"
+                        % (title, rail_index, mcu_pos, stepper_pos, kin_pos, toolhead_pos))
+
     def get_status(self, eventtime=None):
         return {('carriage_%d' % (i,)) : dc.mode
                 for (i, dc) in enumerate(self.dc)}
